@@ -1395,61 +1395,61 @@ static uint64_t xpf_find_iorvbar(void)
 	});
 	return iorvbar;
 }
+
 static uint64_t xpf_find_IOMemoryDescriptor_withAddressRanges_ref(void)
 {
+	PFSection *stringSectionCandidates[] = (PFSection *[]){
+		gXPF.kernelIOSurfaceOsLogSection,
+		gXPF.kernelIOSurfaceStringSection,
+		gXPF.kernelPrelinkTextSection,
+		gXPF.kernelStringSection,
+	};
+
+	PFSection *textSectionCandidates[] = (PFSection *[]) {
+		gXPF.kernelIOSurfaceTextSection,
+		gXPF.kernelPLKTextSection,
+		gXPF.kernelTextSection,
+	};
+
+	PFStringMetric *stringCandidateMetrics[2];
+	stringCandidateMetrics[0] = pfmetric_string_init("IOSurface: Address ranges do not cover requested allocation size\n");
+	stringCandidateMetrics[1] = pfmetric_string_init("%s error - Address ranges do not cover requested allocation size\n");
+
 	__block uint64_t stringAddr = 0;
-	PFStringMetric *stringMetric = pfmetric_string_init("IOSurface: Address ranges do not cover requested allocation size\n");
-	if (gXPF.kernelIOSurfaceOsLogSection) {
-		pfmetric_run(gXPF.kernelIOSurfaceOsLogSection, stringMetric, ^(uint64_t vmaddr, bool *stop){
-			stringAddr = vmaddr;
-			*stop = true;
-		});
+	for (int i = 0; i < (sizeof(stringSectionCandidates) / sizeof(*stringSectionCandidates)); i++) {
+		if (!stringSectionCandidates[i]) continue;
+		for (int y = 0; y < (sizeof(stringCandidateMetrics) / sizeof(*stringCandidateMetrics)); y++) {
+			pfmetric_run(stringSectionCandidates[i], stringCandidateMetrics[y], ^(uint64_t vmaddr, bool *stop){
+				stringAddr = vmaddr;
+				*stop = true;
+			});
+			if (stringAddr) break;
+		}
+		if (stringAddr) break;
 	}
-	if (!stringAddr && gXPF.kernelIOSurfaceStringSection) {
-		pfmetric_run(gXPF.kernelIOSurfaceStringSection, stringMetric, ^(uint64_t vmaddr, bool *stop){
-			stringAddr = vmaddr;
-			*stop = true;
-		});
+	
+	for (int y = 0; y < (sizeof(stringCandidateMetrics) / sizeof(*stringCandidateMetrics)); y++) {
+		pfmetric_free(stringCandidateMetrics[y]);
 	}
-	if (!stringAddr && gXPF.kernelPrelinkTextSection) {
-		pfmetric_run(gXPF.kernelPrelinkTextSection, stringMetric, ^(uint64_t vmaddr, bool *stop){
-			stringAddr = vmaddr;
-			*stop = true;
-		});
-	}
-	if (!stringAddr) {
-		pfmetric_run(gXPF.kernelStringSection, stringMetric, ^(uint64_t vmaddr, bool *stop){
-			stringAddr = vmaddr;
-			*stop = true;
-		});
-	}
-	pfmetric_free(stringMetric);
-	XPF_ASSERT(stringAddr);
+
+	if (!stringAddr) return 0;
 
 	__block PFSection *textSec = NULL;
 	PFXrefMetric *xrefMetric = pfmetric_xref_init(stringAddr, XREF_TYPE_MASK_REFERENCE);
 	__block uint64_t belowRefAddr = 0;
-	if (gXPF.kernelIOSurfaceTextSection) {
-		pfmetric_run(gXPF.kernelIOSurfaceTextSection, xrefMetric, ^(uint64_t vmaddr, bool *stop) {
-			textSec = gXPF.kernelIOSurfaceTextSection;
+
+	for (int i = 0; i < (sizeof(textSectionCandidates) / sizeof(*textSectionCandidates)); i++) {
+		if (!textSectionCandidates[i]) continue;
+		pfmetric_run(textSectionCandidates[i], xrefMetric, ^(uint64_t vmaddr, bool *stop) {
 			belowRefAddr = vmaddr;
 			*stop = true;
 		});
+		if (belowRefAddr) {
+			textSec = textSectionCandidates[i];
+			break;
+		}
 	}
-	if (!belowRefAddr && gXPF.kernelPLKTextSection) {
-		pfmetric_run(gXPF.kernelPLKTextSection, xrefMetric, ^(uint64_t vmaddr, bool *stop) {
-			textSec = gXPF.kernelPLKTextSection;
-			belowRefAddr = vmaddr;
-			*stop = true;
-		});
-	}
-	if (!belowRefAddr) {
-		pfmetric_run(gXPF.kernelTextSection, xrefMetric, ^(uint64_t vmaddr, bool *stop){
-			textSec = gXPF.kernelTextSection;
-			belowRefAddr = vmaddr;
-			*stop = true;
-		});
-	}
+
 	pfmetric_free(xrefMetric);
 	XPF_ASSERT(belowRefAddr);
 
@@ -1466,17 +1466,31 @@ static uint64_t xpf_find_IOSurface_ranges(void)
 	uint64_t IOMemoryDescriptor_withAddressRanges_ref = xpf_item_resolve("kernelStruct.IOSurface.IOMemoryDescriptor_withAddressRanges_ref");
 	XPF_ASSERT(IOMemoryDescriptor_withAddressRanges_ref);
 
-	PFSection *textSec = gXPF.kernelTextSection;
-	if (gXPF.kernelIOSurfaceTextSection && pfsec_contains_vmaddr(gXPF.kernelIOSurfaceTextSection, IOMemoryDescriptor_withAddressRanges_ref)) {
-		textSec = gXPF.kernelIOSurfaceTextSection;
+	PFSection *textSec = NULL;
+	PFSection *textSectionCandidates[] = (PFSection *[]) {
+		gXPF.kernelIOSurfaceTextSection,
+		gXPF.kernelPLKTextSection,
+		gXPF.kernelTextSection,
+	};
+	for (int i = 0; i < (sizeof(textSectionCandidates) / sizeof(*textSectionCandidates)); i++) {
+		if (!textSectionCandidates[i]) continue;
+		if (pfsec_contains_vmaddr(textSectionCandidates[i], IOMemoryDescriptor_withAddressRanges_ref)) {
+			textSec = textSectionCandidates[i];
+			break;
+		}
 	}
-	else if (gXPF.kernelPLKTextSection && pfsec_contains_vmaddr(gXPF.kernelPLKTextSection, IOMemoryDescriptor_withAddressRanges_ref)) {
-		textSec = gXPF.kernelPLKTextSection;
-	}
+
+	__block uint64_t jumpSourceAddr = 0;
+	PFXrefMetric *jumpMetric = pfmetric_xref_init(IOMemoryDescriptor_withAddressRanges_ref - 4, XREF_TYPE_MASK_JUMP);
+	pfmetric_run(textSec, jumpMetric, ^(uint64_t vmaddr, bool *stop){
+		jumpSourceAddr = vmaddr;
+		*stop = true;
+	});
+	pfmetric_free(jumpMetric);
 
 	uint32_t ldrX0AnyInst = 0, ldrX0AnyMask = 0;
 	arm64_gen_ldr_imm(0, LDR_STR_TYPE_UNSIGNED, ARM64_REG_X(0), ARM64_REG_ANY, OPT_UINT64_NONE, &ldrX0AnyInst, &ldrX0AnyMask);
-	uint64_t ldrAddr = pfsec_find_prev_inst(textSec, IOMemoryDescriptor_withAddressRanges_ref, 20, ldrX0AnyInst, ldrX0AnyMask);
+	uint64_t ldrAddr = pfsec_find_prev_inst(textSec, jumpSourceAddr ?: IOMemoryDescriptor_withAddressRanges_ref, 20, ldrX0AnyInst, ldrX0AnyMask);
 	XPF_ASSERT(ldrAddr);
 
 	uint64_t ldrImm = 0;
@@ -1489,13 +1503,27 @@ static uint64_t xpf_find_IOSurface_rangeCount(void)
 	uint64_t IOMemoryDescriptor_withAddressRanges_ref = xpf_item_resolve("kernelStruct.IOSurface.IOMemoryDescriptor_withAddressRanges_ref");
 	XPF_ASSERT(IOMemoryDescriptor_withAddressRanges_ref);
 
-	PFSection *textSec = gXPF.kernelTextSection;
-	if (gXPF.kernelIOSurfaceTextSection && pfsec_contains_vmaddr(gXPF.kernelIOSurfaceTextSection, IOMemoryDescriptor_withAddressRanges_ref)) {
-		textSec = gXPF.kernelIOSurfaceTextSection;
+	PFSection *textSec = NULL;
+	PFSection *textSectionCandidates[] = (PFSection *[]) {
+		gXPF.kernelIOSurfaceTextSection,
+		gXPF.kernelPLKTextSection,
+		gXPF.kernelTextSection,
+	};
+	for (int i = 0; i < (sizeof(textSectionCandidates) / sizeof(*textSectionCandidates)); i++) {
+		if (!textSectionCandidates[i]) continue;
+		if (pfsec_contains_vmaddr(textSectionCandidates[i], IOMemoryDescriptor_withAddressRanges_ref)) {
+			textSec = textSectionCandidates[i];
+			break;
+		}
 	}
-	else if (gXPF.kernelPLKTextSection && pfsec_contains_vmaddr(gXPF.kernelPLKTextSection, IOMemoryDescriptor_withAddressRanges_ref)) {
-		textSec = gXPF.kernelPLKTextSection;
-	}
+
+	__block uint64_t jumpSourceAddr = 0;
+	PFXrefMetric *jumpMetric = pfmetric_xref_init(IOMemoryDescriptor_withAddressRanges_ref - 4, XREF_TYPE_MASK_JUMP);
+	pfmetric_run(textSec, jumpMetric, ^(uint64_t vmaddr, bool *stop){
+		jumpSourceAddr = vmaddr;
+		*stop = true;
+	});
+	pfmetric_free(jumpMetric);
 
 	uint32_t movW1_0x0_Inst = 0, movW1_0x0_Mask = 0;
 	arm64_gen_mov_imm('z', ARM64_REG_W(1), OPT_UINT64(0), OPT_UINT64(0), &movW1_0x0_Inst, &movW1_0x0_Mask);
@@ -1503,8 +1531,9 @@ static uint64_t xpf_find_IOSurface_rangeCount(void)
 	uint32_t ldrW1Inst = 0, ldrW1Mask = 0;
 	arm64_gen_ldr_imm(0, LDR_STR_TYPE_UNSIGNED, ARM64_REG_W(1), ARM64_REG_ANY, OPT_UINT64_NONE, &ldrW1Inst, &ldrW1Mask);
 
+	uint64_t startAddr = jumpSourceAddr ?: IOMemoryDescriptor_withAddressRanges_ref;
 	for (int i = 0; i < 50; i++) {
-		uint64_t curAddr = IOMemoryDescriptor_withAddressRanges_ref - (i*sizeof(uint32_t));
+		uint64_t curAddr = startAddr - (i*sizeof(uint32_t));
 		uint32_t inst = pfsec_read32(textSec, curAddr);
 
 		if ((inst & ldrW1Mask) == ldrW1Inst) {
@@ -1552,9 +1581,16 @@ static uint64_t xpf_find_task_security_config(void)
 	XPF_ASSERT(addAddr);
 
 	arm64_register sourceReg = ARM64_REG_W((pfsec_read32(gXPF.kernelTextSection, addAddr) >> 5) & 0x1f);
+
 	uint32_t ldrbInst = 0, ldrbMask = 0;
 	arm64_gen_ldr_imm('b', LDR_STR_TYPE_UNSIGNED, sourceReg, ARM64_REG_ANY, OPT_UINT64_NONE, &ldrbInst, &ldrbMask);
-	uint64_t ldrAddr = pfsec_find_prev_inst(gXPF.kernelTextSection, addAddr, 5, ldrbInst, ldrbMask);
+	uint32_t ldrhInst = 0, ldrhMask = 0;
+	arm64_gen_ldr_imm('h', LDR_STR_TYPE_UNSIGNED, sourceReg, ARM64_REG_ANY, OPT_UINT64_NONE, &ldrhInst, &ldrhMask);
+
+	uint64_t ldrAddr = pfsec_find_prev_inst(gXPF.kernelTextSection, addAddr, 3, ldrbInst, ldrbMask);
+	if (!ldrAddr) {
+		ldrAddr = pfsec_find_prev_inst(gXPF.kernelTextSection, addAddr, 3, ldrhInst, ldrhMask);
+	}
 	XPF_ASSERT(ldrAddr);
 
 	uint64_t imm = 0;
