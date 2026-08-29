@@ -31,6 +31,8 @@ int main(int argc, char *argv[]) {
 				NULL,
 				NULL,
 				NULL,
+				NULL,
+				NULL,
 			};
 
 			uint32_t idx = 0;
@@ -54,6 +56,16 @@ int main(int argc, char *argv[]) {
 			if (xpf_set_is_supported("trigon")) {
 				sets[idx++] = "trigon"; 
 			}
+
+			/*********** roothide *******/
+			sets[idx++] = "namecache";
+
+			if (xpf_set_is_supported("amfi_oids")) {
+				sets[idx++] = "amfi_oids";
+			}
+
+			sets[idx] = NULL;
+			/*********** roothide *******/
 
 			xpc_object_t serializedSystemInfo = xpf_construct_offset_dictionary((const char **)sets);
 			if (serializedSystemInfo) {

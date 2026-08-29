@@ -1,5 +1,7 @@
 #include "xpf.h"
 
+#include <assert.h>
+
 static uint64_t xpf_find_arm_vm_init(void)
 {
 	PFStringMetric *contiguousHintMetric = pfmetric_string_init("Unsupported memory configuration %lx @%s:%d");
@@ -1598,8 +1600,111 @@ static uint64_t xpf_find_task_security_config(void)
 	return imm;
 }
 
+static uint64_t xpf_find_namecache(uint32_t index) {
+	static uint64_t nchashtbl = 0;
+	static uint64_t nchashmask = 0;
+	if (nchashtbl && nchashmask) {
+		return index == 1 ? nchashtbl : nchashmask;
+	}
+
+	uint32_t movzAny = 0, movzAnyMask = 0;
+	uint32_t movkAny = 0, movkAnyMask = 0;
+	arm64_gen_mov_imm('z', ARM64_REG_ANY, OPT_UINT64(0x1db7), OPT_UINT64_NONE, &movzAny, &movzAnyMask);
+	arm64_gen_mov_imm('k', ARM64_REG_ANY, OPT_UINT64(0x4c1), OPT_UINT64(16), &movkAny, &movkAnyMask);
+	uint32_t crcFlagInst[] = {movzAny, movkAny};
+	uint32_t crcFlagMask[] = {movzAnyMask, movkAnyMask};
+
+	__block uint64_t crcFlag = 0;
+	PFPatternMetric *metric = pfmetric_pattern_init(crcFlagInst, crcFlagMask, sizeof(crcFlagInst), sizeof(uint32_t));
+	pfmetric_run(gXPF.kernelTextSection, metric, ^(uint64_t vmaddr, bool *stop) {
+		crcFlag = vmaddr;
+		*stop = true;
+	});
+	pfmetric_free(metric);
+	XPF_ASSERT(crcFlag);
+
+	uint32_t blAnyInst = 0, blAnyMask = 0;
+	arm64_gen_b_l(OPT_BOOL(true), OPT_UINT64_NONE, OPT_UINT64_NONE, &blAnyInst, &blAnyMask);
+	uint64_t blHashinit = pfsec_find_next_inst(gXPF.kernelTextSection, crcFlag, 100, blAnyInst, blAnyMask);
+	XPF_ASSERT(blHashinit);
+
+	uint32_t adrpAnyInst = 0, adrpAnyMask = 0;
+	uint32_t strAnyInst = 0, strAnyMask = 0;
+	arm64_gen_adr_p(OPT_BOOL(true), OPT_UINT64_NONE, OPT_UINT64_NONE, ARM64_REG_ANY, &adrpAnyInst, &adrpAnyMask);
+	arm64_gen_str_imm(0, LDR_STR_TYPE_ANY, ARM64_REG_ANY, ARM64_REG_ANY, OPT_UINT64_NONE, &strAnyInst, &strAnyMask);
+	uint32_t hashinitInst[] = {adrpAnyInst, strAnyInst};
+	uint32_t hashinitMask[] = {adrpAnyMask, strAnyMask};
+
+	metric = pfmetric_pattern_init(hashinitInst, hashinitMask, sizeof(hashinitInst), sizeof(uint32_t));
+	pfmetric_run_in_range(gXPF.kernelTextSection, blHashinit, blHashinit + 80, metric, ^(uint64_t vmaddr, bool *stop) {
+		uint64_t adrpValue = 0, strValue = 0;
+		arm64_dec_adr_p(pfsec_read32(gXPF.kernelTextSection, vmaddr), vmaddr, &adrpValue, NULL, NULL);
+		arm64_dec_str_imm(pfsec_read32(gXPF.kernelTextSection, vmaddr + 4), NULL, NULL, &strValue, NULL, NULL);
+		if (!nchashtbl) {
+			nchashtbl = adrpValue + strValue;
+		} else if (!nchashmask) {
+			nchashmask = adrpValue + strValue;
+			*stop = true;
+			if (nchashtbl != nchashmask - 8) {
+				nchashtbl = 0;
+				nchashmask = 0;
+			}
+		}
+	});
+	pfmetric_free(metric);
+	XPF_ASSERT(nchashtbl && nchashmask);
+	return index == 1 ? nchashtbl : nchashmask;
+}
+
+static uint64_t xpf_find_amfi_oid(int index) {
+	const char *oidName = index == 1 ? "launch_env_logging" : "developer_mode_status";
+	const char *oidDescription = index == 1 ? "launch environment logging" : "developer mode status";
+	assert(index == 1 || index == 2);
+
+	PFSection *dataSection = gXPF.kernelAMFIDataSection ?: gXPF.kernelDataSection;
+	PFSection *stringSection = gXPF.kernelAMFIStringSection ?: gXPF.kernelStringSection;
+	if (!gXPF.kernelIsArm64e && !gXPF.kernelIsFileset) {
+		dataSection = gXPF.kernelPrelinkDataSection;
+		stringSection = gXPF.kernelPrelinkTextSection;
+	}
+
+	__block uint64_t descriptionAddress = 0;
+	PFStringMetric *descriptionMetric = pfmetric_string_init(oidDescription);
+	pfmetric_run(stringSection, descriptionMetric, ^(uint64_t vmaddr, bool *stop) {
+		descriptionAddress = vmaddr;
+		*stop = true;
+	});
+	pfmetric_free(descriptionMetric);
+	XPF_ASSERT(descriptionAddress);
+
+	__block uint64_t descriptionPointer = 0;
+	PFXrefMetric *pointerMetric = pfmetric_xref_init(descriptionAddress, XREF_TYPE_MASK_POINTER);
+	pfmetric_run(dataSection, pointerMetric, ^(uint64_t vmaddr, bool *stop) {
+		descriptionPointer = vmaddr;
+		*stop = true;
+	});
+	pfmetric_free(pointerMetric);
+	XPF_ASSERT(descriptionPointer);
+
+	uint64_t namePointer = descriptionPointer - 0x18;
+	uint64_t nameAddress = pfsec_read_pointer(dataSection, namePointer);
+	XPF_ASSERT(nameAddress);
+	char *resolvedName = NULL;
+	XPF_ASSERT(pfsec_read_string(stringSection, nameAddress, &resolvedName) == 0);
+	bool nameMatches = resolvedName && strcmp(resolvedName, oidName) == 0;
+	free(resolvedName);
+	XPF_ASSERT(nameMatches);
+	return namePointer;
+}
+
 void xpf_common_init(void)
 {
+	// RootHide support (from OwnGoalStudio/Relaxin): namecache hash globals + AMFI sysctl OIDs
+	xpf_item_register("kernelSymbol.launch_env_logging", xpf_find_amfi_oid, (void *)(uintptr_t)1);
+	xpf_item_register("kernelSymbol.developer_mode_status", xpf_find_amfi_oid, (void *)(uintptr_t)2);
+	xpf_item_register("kernelSymbol.nchashtbl", xpf_find_namecache, (void *)(uintptr_t)1);
+	xpf_item_register("kernelSymbol.nchashmask", xpf_find_namecache, (void *)(uintptr_t)2);
+
 	xpf_item_register("kernelSymbol.start_first_cpu", xpf_find_start_first_cpu, NULL);
 	xpf_item_register("kernelConstant.kernel_el", xpf_find_kernel_el, NULL);
 	if (!gXPF.sptm) {
